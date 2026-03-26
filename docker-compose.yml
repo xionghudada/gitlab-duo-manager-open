@@ -1,0 +1,14 @@
+services:
+  duo-manager:
+    build: .
+    ports:
+      - "${PORT:-22341}:${PORT:-22341}"
+    volumes:
+      - data:/app/data
+    environment:
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - PORT=${PORT:-22341}
+    restart: unless-stopped
+
+volumes:
+  data:

@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@theme {
+  --color-kawaii-pink: #FFB6D9;
+  --color-kawaii-pink-light: #FFDBE9;
+  --color-kawaii-purple: #E6D5FF;
+  --color-kawaii-purple-light: #F5EDFF;
+  --color-kawaii-green: #D4F1D4;
+  --color-kawaii-green-light: #E8F8E8;
+  --color-kawaii-yellow: #FFF9E6;
+  --color-kawaii-cream: #FFF9F5;
+  --color-kawaii-text: #333333;
+  --color-kawaii-text-md: #666666;
+  --color-kawaii-text-lt: #999999;
+
+  --radius-kawaii-sm: 16px;
+  --radius-kawaii-md: 24px;
+  --radius-kawaii-lg: 32px;
+
+  --shadow-kawaii-sm: 0 4px 12px rgba(255, 182, 217, 0.15);
+  --shadow-kawaii-md: 0 8px 20px rgba(255, 182, 217, 0.25);
+  --shadow-kawaii-lg: 0 12px 32px rgba(255, 182, 217, 0.35);
+
+  --animate-kawaii-bounce: kawaiiBounce 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+  --animate-kawaii-float: kawaiiFloat 3s ease-in-out infinite;
+}
+
+@keyframes kawaiiBounce {
+  0%, 100% { transform: translateY(-4px); }
+  50% { transform: translateY(-12px); }
+}
+
+@keyframes kawaiiFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+.kawaii-gradient-text {
+  background: linear-gradient(135deg, #FFB6D9 0%, #D4F1D4 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.kawaii-gradient-bg {
+  background: linear-gradient(135deg, #FFB6D9, #E6D5FF);
+}
