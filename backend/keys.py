@@ -132,7 +132,7 @@ class KeyManager:
             headers = data.get("headers", {}) or {}
             if not token:
                 raise RuntimeError(f"Empty token: {data}")
-            expires_at = time.time() + 7200
+            expires_at = time.time() + 3600
             if "expires_at" in data:
                 try:
                     ea = float(data["expires_at"])
@@ -421,8 +421,9 @@ class KeyManager:
 
     async def _safe_refresh(self, key: KeyConfig):
         try:
-            await self.get_token(key)
-            logger.info(f"Token refreshed: '{key.name}'")
+            self.invalidate_token(key)
+            entry = await self.get_token(key)
+            logger.info(f"Token refreshed: '{key.name}' (TTL={entry.ttl}s)")
         except Exception as e:
             logger.warning(f"Token refresh failed: '{key.name}': {e}")
 
@@ -438,10 +439,15 @@ class KeyManager:
                 if key.auth_type == "oauth" and not self._oauth_valid(key):
                     try:
                         await self._get_oauth_access_token(key)
+                        logger.info(f"OAuth access token refreshed: '{key.name}'")
                     except Exception as e:
                         logger.warning(f"OAuth refresh failed: '{key.name}': {e}")
                 token = self._tokens.get(self._cache_key(key))
-                if token and token.ttl < 1800:
+                if not token:
+                    await self._safe_refresh(key)
+                elif token.ttl < 1200:
+                    # Refresh when < 20 min remaining (aggressive for 1h tokens)
+                    logger.info(f"Token TTL low ({token.ttl}s) for '{key.name}', refreshing...")
                     await self._safe_refresh(key)
 
     async def start_validation_loop(self):

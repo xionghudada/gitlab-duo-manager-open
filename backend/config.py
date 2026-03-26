@@ -114,7 +114,14 @@ class ConfigManager:
     def _save(self, cfg: AppConfig | None = None):
         if cfg is None:
             cfg = self.config
+        # Don't persist env-sourced admin password to disk
+        env_pw = ""
+        if self.admin_password_source == ".env":
+            env_pw = cfg.settings.admin_password
+            cfg.settings.admin_password = ""
         CONFIG_FILE.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
+        if env_pw:
+            cfg.settings.admin_password = env_pw
 
     @property
     def login_setup_required(self) -> bool:

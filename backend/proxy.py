@@ -57,6 +57,7 @@ async def proxy_messages(request: Request, key_mgr: KeyManager, log_mgr: LogMana
         return _stream_with_continuation(request, payload, keys, key_mgr, log_mgr, time.time(), auto_continue)
 
     # Non-streaming retry path
+    request_body = json.dumps(payload).encode() if payload else body
     tried: set[str] = set()
     last_result: Response | None = None
     for attempt in range(max_retries + 1):
@@ -66,7 +67,7 @@ async def proxy_messages(request: Request, key_mgr: KeyManager, log_mgr: LogMana
         tried.add(key.id)
         start_time = time.time()
 
-        result = await _do_proxy(request, key_mgr, key, body, is_stream)
+        result = await _do_proxy(request, key_mgr, key, request_body)
         if isinstance(result, tuple):
             response, usage = result
         else:
@@ -192,6 +193,9 @@ def _stream_with_continuation(
                 error_body = await r.aread()
                 await r.aclose()
                 await c.aclose()
+                if r.status_code == 401:
+                    key_mgr.invalidate_token(key)
+                key_mgr.record_failure(key)
                 _log_result(key, model, start_time, 0, 0, False, key_mgr, log_mgr, r.status_code)
                 if r.status_code in NON_RETRYABLE_STATUSES:
                     yield error_body
@@ -201,6 +205,7 @@ def _stream_with_continuation(
                     await c.aclose()
                 except Exception:
                     pass
+                key_mgr.record_failure(key)
                 logger.warning(f"Connection failed for '{key.name}': {e}")
 
         if not selected_key or not resp or not client:
@@ -456,7 +461,7 @@ def _close_events(block_idx: int, block_open: bool, output_tokens: int, stop_rea
 # Non-streaming proxy
 # ---------------------------------------------------------------------------
 
-async def _do_proxy(request: Request, key_mgr: KeyManager, key, body: bytes, is_stream: bool):
+async def _do_proxy(request: Request, key_mgr: KeyManager, key, body: bytes):
     try:
         entry = await key_mgr.get_token(key)
     except Exception as e:

@@ -3,6 +3,7 @@ import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
+from html import escape as html_escape
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -225,6 +226,11 @@ async def gitlab_oauth_start(request: Request):
         return err
     if not config_mgr.gitlab_oauth_configured:
         return _err("请先配置 GITLAB_OAUTH_CLIENT_ID 和 GITLAB_OAUTH_CLIENT_SECRET", 400)
+    # Cleanup expired states
+    now = time.time()
+    expired = [k for k, v in oauth_states.items() if v.get("expires_at", 0) < now]
+    for k in expired:
+        del oauth_states[k]
     state = secrets.token_urlsafe(24)
     redirect_uri = _oauth_redirect_uri(request)
     oauth_states[state] = {"expires_at": time.time() + 600, "redirect_uri": redirect_uri}
@@ -232,7 +238,7 @@ async def gitlab_oauth_start(request: Request):
         "client_id": config_mgr.gitlab_oauth_client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": "api read_user profile email offline_access",
+        "scope": "api read_user",
         "state": state,
     })
     return {"authorize_url": f"{config_mgr.config.settings.gitlab_url}/oauth/authorize?{params}"}
@@ -285,6 +291,7 @@ async def gitlab_oauth_callback(code: str | None = None, state: str | None = Non
 
 
 def _oauth_popup_html(ok: bool, message: str, payload: dict | None = None) -> HTMLResponse:
+    safe_message = html_escape(message)
     body = {
         "type": "gitlab-oauth-result",
         "ok": ok,
@@ -296,7 +303,7 @@ def _oauth_popup_html(ok: bool, message: str, payload: dict | None = None) -> HT
 <head><meta charset="utf-8"><title>GitLab OAuth</title></head>
 <body style="font-family: sans-serif; padding: 24px;">
   <h2>{'登录成功' if ok else '登录失败'}</h2>
-  <p>{message}</p>
+  <p>{safe_message}</p>
   <script>
     const payload = {json.dumps(body, ensure_ascii=False)};
     try {{
