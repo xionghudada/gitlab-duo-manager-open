@@ -12,12 +12,22 @@ export function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "请求失败"
 }
 
+const AUTH_TOKEN_KEY = "auth_token"
+
 function getToken(): string | null {
-  return localStorage.getItem("auth_token")
+  const sessionToken = sessionStorage.getItem(AUTH_TOKEN_KEY)
+  if (sessionToken) return sessionToken
+  const legacyToken = localStorage.getItem(AUTH_TOKEN_KEY)
+  if (legacyToken) {
+    sessionStorage.setItem(AUTH_TOKEN_KEY, legacyToken)
+    localStorage.removeItem(AUTH_TOKEN_KEY)
+  }
+  return legacyToken
 }
 
 function setToken(token: string) {
-  localStorage.setItem("auth_token", token)
+  sessionStorage.setItem(AUTH_TOKEN_KEY, token)
+  localStorage.removeItem(AUTH_TOKEN_KEY)
 }
 
 export function isAuthenticated(): boolean {
@@ -25,7 +35,8 @@ export function isAuthenticated(): boolean {
 }
 
 export function logout() {
-  localStorage.removeItem("auth_token")
+  sessionStorage.removeItem(AUTH_TOKEN_KEY)
+  localStorage.removeItem(AUTH_TOKEN_KEY)
 }
 
 async function request<T = unknown>(path: string, options?: RequestInit): Promise<T> {
@@ -163,7 +174,7 @@ export type SettingsInfo = {
   rotation_mode: string; max_retries: number; blacklist_threshold: number
   validation_interval: number; max_continuations: number; max_tokens_cap: number
   test_model: string; gitlab_url: string; anthropic_proxy: string
-  gitlab_oauth_client_id: string; gitlab_oauth_client_secret: string; gitlab_oauth_redirect_uri: string
+  gitlab_oauth_client_id: string; gitlab_oauth_client_secret_configured: boolean; gitlab_oauth_redirect_uri: string
 }
 
 export type StatsInfo = {

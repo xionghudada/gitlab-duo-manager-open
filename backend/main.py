@@ -2,6 +2,7 @@ import json
 import logging
 import secrets
 import time
+import hashlib
 from contextlib import asynccontextmanager
 from html import escape as html_escape
 from pathlib import Path
@@ -27,6 +28,48 @@ config_mgr = ConfigManager()
 key_mgr = KeyManager(config_mgr)
 log_mgr = LogManager()
 oauth_states: dict[str, dict] = {}
+
+
+class AdminSessionManager:
+    def __init__(self, ttl_seconds: int = 86400):
+        self.ttl_seconds = ttl_seconds
+        self._sessions: dict[str, float] = {}
+
+    def _digest(self, token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def _cleanup(self):
+        now = time.time()
+        expired = [token for token, expires_at in self._sessions.items() if expires_at <= now]
+        for token in expired:
+            del self._sessions[token]
+
+    def create(self) -> str:
+        self._cleanup()
+        token = secrets.token_urlsafe(32)
+        self._sessions[self._digest(token)] = time.time() + self.ttl_seconds
+        return token
+
+    def verify(self, token: str) -> bool:
+        if not token:
+            return False
+        self._cleanup()
+        digest = self._digest(token)
+        expires_at = self._sessions.get(digest)
+        if not expires_at:
+            return False
+        self._sessions[digest] = time.time() + self.ttl_seconds
+        return True
+
+    def invalidate(self, token: str):
+        if token:
+            self._sessions.pop(self._digest(token), None)
+
+    def invalidate_all(self):
+        self._sessions.clear()
+
+
+admin_session_mgr = AdminSessionManager()
 
 
 def _mask(value: str) -> str:
@@ -76,7 +119,7 @@ def _get_bearer(request: Request) -> str:
 
 def _verify_admin(request: Request) -> Response | None:
     token = _get_bearer(request)
-    if token != config_mgr.config.settings.admin_password:
+    if not admin_session_mgr.verify(token):
         return _err("未授权", 401)
     return None
 
@@ -130,12 +173,14 @@ async def login(req: LoginReq):
             return _err("当前尚未初始化管理密码，请在登录页完成首次设置", 400)
         if not config_mgr.can_persist_admin_password:
             return _err("当前管理密码由环境变量控制，无法写入 config.json", 400)
-        token = config_mgr.set_admin_password(password)
-        return {"token": token, "setup_completed": True}
+        config_mgr.set_admin_password(password)
+        token = admin_session_mgr.create()
+        return {"token": token, "setup_completed": True, "expires_in": admin_session_mgr.ttl_seconds}
 
-    if password != config_mgr.config.settings.admin_password:
+    if not config_mgr.verify_admin_password(password):
         return _err("密码错误", 401)
-    return {"token": config_mgr.config.settings.admin_password, "setup_completed": False}
+    token = admin_session_mgr.create()
+    return {"token": token, "setup_completed": False, "expires_in": admin_session_mgr.ttl_seconds}
 
 
 @app.get("/api/admin-password/meta")
@@ -150,15 +195,20 @@ async def admin_password_meta(request: Request):
 
 @app.post("/api/admin-password")
 async def change_admin_password(request: Request, req: ChangeAdminPasswordReq):
+    current_session = _get_bearer(request)
     if err := _verify_admin(request):
         return err
     try:
-        token = config_mgr.change_admin_password(req.current_password, req.new_password)
+        config_mgr.change_admin_password(req.current_password, req.new_password)
     except ValueError as exc:
         return _err(str(exc), 400)
+    admin_session_mgr.invalidate(current_session)
+    admin_session_mgr.invalidate_all()
+    token = admin_session_mgr.create()
     return {
         "token": token,
         "password_source": config_mgr.admin_password_source,
+        "expires_in": admin_session_mgr.ttl_seconds,
     }
 
 
@@ -565,7 +615,7 @@ def _settings_dict(s) -> dict:
         "gitlab_url": s.gitlab_url,
         "anthropic_proxy": s.anthropic_proxy,
         "gitlab_oauth_client_id": s.gitlab_oauth_client_id,
-        "gitlab_oauth_client_secret": s.gitlab_oauth_client_secret,
+        "gitlab_oauth_client_secret_configured": bool(config_mgr.gitlab_oauth_client_secret),
         "gitlab_oauth_redirect_uri": s.gitlab_oauth_redirect_uri,
     }
 

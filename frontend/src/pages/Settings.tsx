@@ -13,6 +13,7 @@ export default function Settings() {
   const [adminPasswordMeta, setAdminPasswordMeta] = useState<AdminPasswordMeta | null>(null)
   const [loading, setLoading] = useState(true)
   const [newKeyName, setNewKeyName] = useState("")
+  const [oauthClientSecret, setOauthClientSecret] = useState("")
   const [savingOAuth, setSavingOAuth] = useState(false)
   const [currentPassword, setCurrentPassword] = useState("")
   const [nextPassword, setNextPassword] = useState("")
@@ -99,12 +100,16 @@ export default function Settings() {
     if (!settings) return
     setSavingOAuth(true)
     try {
-      const updated = await updateSettings({
+      const fields: Record<string, unknown> = {
         gitlab_oauth_client_id: settings.gitlab_oauth_client_id,
-        gitlab_oauth_client_secret: settings.gitlab_oauth_client_secret,
         gitlab_oauth_redirect_uri: settings.gitlab_oauth_redirect_uri,
-      })
+      }
+      if (oauthClientSecret.trim()) {
+        fields.gitlab_oauth_client_secret = oauthClientSecret.trim()
+      }
+      const updated = await updateSettings(fields)
       setSettings(updated)
+      setOauthClientSecret("")
       toast("OAuth 配置已保存")
     } catch (e) {
       toast(getErrorMessage(e), "error")
@@ -276,7 +281,7 @@ export default function Settings() {
               />
               <div className="flex items-center justify-between gap-3">
                 <span className="text-xs text-kawaii-text-lt">
-                  {"\u4FEE\u6539\u6210\u529F\u540E\uFF0C\u5F53\u524D\u767B\u5F55\u6001\u4F1A\u81EA\u52A8\u5207\u6362\u5230\u65B0\u5BC6\u7801\u3002"}
+                  {"\u4FEE\u6539\u6210\u529F\u540E\uFF0C\u7CFB\u7EDF\u4F1A\u81EA\u52A8\u7B7E\u53D1\u65B0\u7684\u7BA1\u7406\u4F1A\u8BDD\u3002"}
                 </span>
                 <button
                   onClick={() => void handleChangeAdminPassword()}
@@ -329,10 +334,15 @@ export default function Settings() {
               <input
                 type="password"
                 className="w-full bg-kawaii-cream border-2 border-kawaii-pink-light rounded-kawaii-md px-4 py-2.5 text-sm focus:outline-none focus:border-kawaii-pink transition-all"
-                value={settings.gitlab_oauth_client_secret}
-                onChange={(e) => setSettings({ ...settings, gitlab_oauth_client_secret: e.target.value })}
-                placeholder={"GitLab OAuth Client Secret"}
+                value={oauthClientSecret}
+                onChange={(e) => setOauthClientSecret(e.target.value)}
+                placeholder={settings.gitlab_oauth_client_secret_configured ? "已配置，留空表示保持不变" : "GitLab OAuth Client Secret"}
               />
+              <div className="text-xs text-kawaii-text-lt mt-1">
+                {settings.gitlab_oauth_client_secret_configured
+                  ? "当前已配置 Client Secret，界面不会回显明文。"
+                  : "当前未配置 Client Secret。"}
+              </div>
             </div>
             <div>
               <label className="block text-xs text-kawaii-text-lt mb-1">Redirect URI</label>

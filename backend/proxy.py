@@ -115,6 +115,7 @@ def _stream_with_continuation(
     acc_text = ""
     total_input = 0
     total_output = 0
+    per_key_usage: dict[str, dict[str, int | object]] = {}
 
     async def generate():
         nonlocal acc_text, total_input, total_output
@@ -129,6 +130,16 @@ def _stream_with_continuation(
         client_block_open = False
         cap_triggered = False
         client_text_len = 0
+        final_key = None
+
+        def _add_usage(key, input_tokens: int = 0, output_tokens: int = 0):
+            entry = per_key_usage.setdefault(key.id, {
+                "key": key,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            })
+            entry["input_tokens"] = int(entry["input_tokens"]) + input_tokens
+            entry["output_tokens"] = int(entry["output_tokens"]) + output_tokens
 
         def _parse_sse_line(stripped: str):
             nonlocal acc_text, total_input, total_output, stop_reason, got_message_stop
@@ -189,14 +200,14 @@ def _stream_with_continuation(
                 )
                 if r.status_code == 200:
                     selected_key, resp, client = key, r, c
+                    final_key = key
                     break
                 error_body = await r.aread()
                 await r.aclose()
                 await c.aclose()
                 if r.status_code == 401:
                     key_mgr.invalidate_token(key)
-                key_mgr.record_failure(key)
-                _log_result(key, model, start_time, 0, 0, False, key_mgr, log_mgr, r.status_code)
+                _log_stream_attempt(key, model, start_time, key_mgr, log_mgr, r.status_code, error=f"HTTP {r.status_code}")
                 if r.status_code in NON_RETRYABLE_STATUSES:
                     yield error_body
                     return
@@ -205,7 +216,7 @@ def _stream_with_continuation(
                     await c.aclose()
                 except Exception:
                     pass
-                key_mgr.record_failure(key)
+                _log_stream_attempt(key, model, start_time, key_mgr, log_mgr, 502, error=str(e))
                 logger.warning(f"Connection failed for '{key.name}': {e}")
 
         if not selected_key or not resp or not client:
@@ -281,15 +292,28 @@ def _stream_with_continuation(
                 }))
             logger.info(f"Cap hit (max_tokens), entering continuation ({len(acc_text)} chars)")
         elif got_message_stop:
-            _log_result(selected_key, model, start_time, total_input, total_output, True, key_mgr, log_mgr)
+            _add_usage(selected_key, total_input, total_output)
+            _log_stream_success(model, start_time, per_key_usage, final_key or selected_key, key_mgr, log_mgr)
             return
+
+        _add_usage(selected_key, total_input, total_output)
 
         # === Phase 2: Continuation with key rotation ===
         if not acc_text or max_cont <= 0:
             if cap_triggered:
                 yield _close_events(client_block_idx, client_block_open, total_output, stop_reason or "max_tokens")
-            _log_result(selected_key, model, start_time, total_input, total_output, not acc_text, key_mgr, log_mgr,
-                        error="Stream truncated, no continuation" if acc_text else "Stream failed")
+            if not acc_text:
+                _log_stream_success(model, start_time, per_key_usage, final_key or selected_key, key_mgr, log_mgr)
+            else:
+                _log_stream_attempt(
+                    selected_key,
+                    model,
+                    start_time,
+                    key_mgr,
+                    log_mgr,
+                    502,
+                    error="Stream truncated, no continuation",
+                )
             return
 
         if not cap_triggered:
@@ -311,6 +335,9 @@ def _stream_with_continuation(
 
             cont_resp = None
             cont_client = None
+            cont_key = None
+            cont_input_before = total_input
+            cont_output_before = total_output
             for ck in cont_keys:
                 try:
                     entry = await key_mgr.get_token(ck)
@@ -329,20 +356,26 @@ def _stream_with_continuation(
                         stream=True,
                     )
                     if cr.status_code == 200:
+                        cont_key = ck
                         cont_resp, cont_client = cr, cc
+                        final_key = ck
                         break
                     await cr.aread()
                     await cr.aclose()
                     await cc.aclose()
+                    _log_stream_attempt(ck, model, start_time, key_mgr, log_mgr, cr.status_code, error=f"HTTP {cr.status_code}")
+                    if cr.status_code == 401:
+                        key_mgr.invalidate_token(ck)
                     if cr.status_code in NON_RETRYABLE_STATUSES:
                         break
-                except Exception:
+                except Exception as e:
                     try:
                         await cc.aclose()
                     except Exception:
                         pass
+                    _log_stream_attempt(ck, model, start_time, key_mgr, log_mgr, 502, error=str(e))
 
-            if not cont_resp or not cont_client:
+            if not cont_resp or not cont_client or not cont_key:
                 logger.error(f"All keys failed for continuation {cont + 1}")
                 break
 
@@ -393,6 +426,7 @@ def _stream_with_continuation(
 
                 await cont_resp.aclose()
                 await cont_client.aclose()
+                _add_usage(cont_key, total_input - cont_input_before, total_output - cont_output_before)
 
             except Exception as e:
                 try:
@@ -413,31 +447,62 @@ def _stream_with_continuation(
                     continue
                 logger.info(f"Continuation {cont + 1} completed ({len(acc_text)} total chars)")
                 yield _close_events(client_block_idx, client_block_open, total_output, cont_stop_reason or "end_turn")
-                _log_result(selected_key, model, start_time, total_input, total_output, True, key_mgr, log_mgr)
+                _log_stream_success(model, start_time, per_key_usage, final_key or cont_key, key_mgr, log_mgr)
                 return
 
             reason = "DROP" if not cont_got_stop else f"stop_reason={cont_stop_reason}"
             logger.info(f"Continuation {cont + 1}/{max_cont} truncated ({reason}, {len(acc_text)} chars)")
 
         yield _close_events(client_block_idx, client_block_open, total_output, cont_stop_reason or stop_reason or "end_turn")
-        _log_result(selected_key, model, start_time, total_input, total_output, True, key_mgr, log_mgr)
+        _log_stream_success(model, start_time, per_key_usage, final_key or selected_key, key_mgr, log_mgr)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-def _log_result(key, model, start_time, inp, out, ok, key_mgr, log_mgr, status=None, error=""):
+def _log_stream_attempt(key, model, start_time, key_mgr, log_mgr, status: int, error: str = ""):
     duration_ms = int((time.time() - start_time) * 1000)
-    if ok:
+    if status != 499:
+        key_mgr.record_failure(key)
+    log_mgr.add(LogEntry(
+        key_id=key.id,
+        key_name=key.name,
+        model=model,
+        status=status,
+        duration_ms=duration_ms,
+        is_stream=True,
+        error=error or f"HTTP {status}",
+    ))
+
+
+def _log_stream_success(model, start_time, per_key_usage, final_key, key_mgr, log_mgr):
+    duration_ms = int((time.time() - start_time) * 1000)
+    total_input = 0
+    total_output = 0
+
+    for entry in per_key_usage.values():
+        key = entry["key"]
+        inp = int(entry["input_tokens"])
+        out = int(entry["output_tokens"])
+        total_input += inp
+        total_output += out
         key_mgr.record_success(key)
         key_mgr.record_usage(key, inp, out)
-        log_mgr.add(LogEntry(key_id=key.id, key_name=key.name, model=model,
-                             status=200, duration_ms=duration_ms,
-                             input_tokens=inp, output_tokens=out, is_stream=True))
-    else:
-        key_mgr.record_failure(key)
-        log_mgr.add(LogEntry(key_id=key.id, key_name=key.name, model=model,
-                             status=status or 502, duration_ms=duration_ms,
-                             is_stream=True, error=error or "Stream failed"))
+
+    if final_key is None and per_key_usage:
+        final_key = next(iter(per_key_usage.values()))["key"]
+    if final_key is None:
+        return
+
+    log_mgr.add(LogEntry(
+        key_id=final_key.id,
+        key_name=final_key.name,
+        model=model,
+        status=200,
+        duration_ms=duration_ms,
+        input_tokens=total_input,
+        output_tokens=total_output,
+        is_stream=True,
+    ))
 
 
 def _sse(event_type: str, data_str: str) -> bytes:

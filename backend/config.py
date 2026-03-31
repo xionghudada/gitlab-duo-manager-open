@@ -2,6 +2,8 @@ import json
 import os
 import secrets
 import uuid
+import hashlib
+import hmac
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +32,19 @@ def _load_dotenv():
 
 
 _load_dotenv()
+
+
+def _new_password_salt() -> str:
+    return secrets.token_hex(16)
+
+
+def _hash_admin_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        310_000,
+    ).hex()
 
 
 class KeyConfig(BaseModel):
@@ -69,6 +84,8 @@ class Settings(BaseModel):
     test_model: str = "claude-sonnet-4-6"
     api_keys: list[ApiKeyEntry] = []
     admin_password: str = ""
+    admin_password_hash: str = ""
+    admin_password_salt: str = ""
     gitlab_url: str = "https://gitlab.com"
     anthropic_proxy: str = "https://cloud.gitlab.com/ai/v1/proxy/anthropic"
     gitlab_oauth_client_id: str = ""
@@ -82,6 +99,15 @@ class Settings(BaseModel):
             old_key = data.pop("proxy_api_key")
             if "api_keys" not in data or not data["api_keys"]:
                 data["api_keys"] = [{"name": "Default", "key": old_key}]
+        if isinstance(data, dict):
+            legacy_password = (data.get("admin_password") or "").strip()
+            password_hash = (data.get("admin_password_hash") or "").strip()
+            password_salt = (data.get("admin_password_salt") or "").strip()
+            if legacy_password and not (password_hash and password_salt):
+                salt = _new_password_salt()
+                data["admin_password_hash"] = _hash_admin_password(legacy_password, salt)
+                data["admin_password_salt"] = salt
+                data["admin_password"] = ""
         return data
 
 
@@ -93,6 +119,7 @@ class AppConfig(BaseModel):
 class ConfigManager:
     def __init__(self):
         self.admin_password_source = "unset"
+        self._env_admin_password = ""
         self.config = self._load()
 
     def _load(self) -> AppConfig:
@@ -101,12 +128,11 @@ class ConfigManager:
             cfg = AppConfig.model_validate_json(CONFIG_FILE.read_text(encoding="utf-8"))
         else:
             cfg = AppConfig()
-        # .env ADMIN_PASSWORD overrides config
-        env_pw = os.environ.get("ADMIN_PASSWORD")
+        env_pw = os.environ.get("ADMIN_PASSWORD", "").strip()
         if env_pw:
-            cfg.settings.admin_password = env_pw
+            self._env_admin_password = env_pw
             self.admin_password_source = ".env"
-        elif cfg.settings.admin_password:
+        elif cfg.settings.admin_password_hash.strip() and cfg.settings.admin_password_salt.strip():
             self.admin_password_source = "config"
         self._save(cfg)
         return cfg
@@ -114,41 +140,50 @@ class ConfigManager:
     def _save(self, cfg: AppConfig | None = None):
         if cfg is None:
             cfg = self.config
-        # Don't persist env-sourced admin password to disk
-        env_pw = ""
-        if self.admin_password_source == ".env":
-            env_pw = cfg.settings.admin_password
-            cfg.settings.admin_password = ""
         CONFIG_FILE.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
-        if env_pw:
-            cfg.settings.admin_password = env_pw
 
     @property
     def login_setup_required(self) -> bool:
-        return not bool(self.config.settings.admin_password.strip())
+        return not bool(self._env_admin_password or self.has_persisted_admin_password)
 
     @property
     def can_persist_admin_password(self) -> bool:
         return self.admin_password_source != ".env"
 
-    def set_admin_password(self, password: str) -> str:
+    @property
+    def has_persisted_admin_password(self) -> bool:
+        settings = self.config.settings
+        return bool(settings.admin_password_hash.strip() and settings.admin_password_salt.strip())
+
+    def set_admin_password(self, password: str):
         password = password.strip()
         if not password:
             raise ValueError("管理密码不能为空")
-        self.config.settings.admin_password = password
+        salt = _new_password_salt()
+        self.config.settings.admin_password = ""
+        self.config.settings.admin_password_hash = _hash_admin_password(password, salt)
+        self.config.settings.admin_password_salt = salt
         self.admin_password_source = "config"
         self._save()
-        return password
 
     def verify_admin_password(self, password: str) -> bool:
-        return password.strip() == self.config.settings.admin_password
+        candidate = password.strip()
+        if not candidate:
+            return False
+        if self._env_admin_password:
+            return hmac.compare_digest(candidate, self._env_admin_password)
+        settings = self.config.settings
+        if not (settings.admin_password_hash and settings.admin_password_salt):
+            return False
+        expected = _hash_admin_password(candidate, settings.admin_password_salt)
+        return hmac.compare_digest(expected, settings.admin_password_hash)
 
-    def change_admin_password(self, current_password: str, new_password: str) -> str:
+    def change_admin_password(self, current_password: str, new_password: str):
         if not self.can_persist_admin_password:
             raise ValueError("当前管理密码由环境变量控制，无法写入 config.json")
         if not self.verify_admin_password(current_password):
             raise ValueError("当前密码不正确")
-        return self.set_admin_password(new_password)
+        self.set_admin_password(new_password)
 
     def add_key(self, name: str, pat: str) -> KeyConfig:
         order = max((k.order for k in self.config.keys), default=-1) + 1
@@ -243,6 +278,8 @@ class ConfigManager:
     def update_settings(self, **fields) -> Settings:
         for field, value in fields.items():
             if hasattr(self.config.settings, field):
+                if field == "gitlab_oauth_client_secret" and isinstance(value, str) and not value.strip():
+                    continue
                 setattr(self.config.settings, field, value)
         self._save()
         return self.config.settings
