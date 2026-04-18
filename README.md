@@ -72,4 +72,4 @@ docker compose up -d --build
 
 - **后端**：Python / FastAPI / httpx / uvicorn
 - **前端**：React 19 / Vite 6 / TypeScript / Tailwind CSS v4
-- **部署**：Docker 多阶段构建
+- **部署**：Docker 多阶段构建。
